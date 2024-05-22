@@ -356,6 +356,10 @@ where
             #[cfg(target_os = "linux")]
             window.set_mouse_cursor(cursor_icon);
         }
+
+        if !self.full_output.platform_output.events.is_empty() {
+            window.focus();
+        }
     }
 
     fn on_event(&mut self, _window: &mut Window, event: Event) -> EventStatus {
