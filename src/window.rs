@@ -1,32 +1,47 @@
-use baseview::{
-    Event, EventStatus, Window, WindowHandle, WindowHandler, WindowOpenOptions, WindowScalePolicy,
-};
-use copypasta::ClipboardProvider;
-use egui::{pos2, vec2, FullOutput, Pos2, Rect, Rgba, ViewportCommand};
-use keyboard_types::Modifiers;
-use raw_window_handle::HasRawWindowHandle;
 use std::time::Instant;
 
+use baseview::{
+    Event, EventStatus, PhySize, Window, WindowHandle, WindowHandler, WindowOpenOptions,
+    WindowScalePolicy,
+};
+use copypasta::ClipboardProvider;
+use egui::{pos2, vec2, Pos2, Rect, Rgba, ViewportCommand};
+use keyboard_types::Modifiers;
+use raw_window_handle::HasRawWindowHandle;
+
+#[cfg(feature = "wgpu")]
+use crate::renderer;
 use crate::renderer::Renderer;
 
 pub struct Queue<'a> {
     bg_color: &'a mut Rgba,
     close_requested: &'a mut bool,
+    physical_size: &'a mut PhySize,
 }
 
 impl<'a> Queue<'a> {
-    pub(crate) fn new(bg_color: &'a mut Rgba, close_requested: &'a mut bool) -> Self {
+    pub(crate) fn new(
+        bg_color: &'a mut Rgba,
+        close_requested: &'a mut bool,
+        physical_size: &'a mut PhySize,
+    ) -> Self {
         Self {
             bg_color,
             //renderer,
             //repaint_requested,
             close_requested,
+            physical_size,
         }
     }
 
     /// Set the background color.
     pub fn bg_color(&mut self, bg_color: Rgba) {
         *self.bg_color = bg_color;
+    }
+
+    /// Set size of the window.
+    pub fn resize(&mut self, physical_size: PhySize) {
+        *self.physical_size = physical_size;
     }
 
     /// Close the window.
@@ -52,8 +67,8 @@ impl OpenSettings {
 
         Self {
             scale_policy,
-            logical_width: settings.size.width as f64,
-            logical_height: settings.size.height as f64,
+            logical_width: settings.size.width,
+            logical_height: settings.size.height,
             title: settings.title.clone(),
         }
     }
@@ -80,17 +95,13 @@ where
 
     clipboard_ctx: Option<copypasta::ClipboardContext>,
 
-    physical_width: u32,
-    physical_height: u32,
+    physical_size: PhySize,
     scale_policy: WindowScalePolicy,
     pixels_per_point: f32,
     points_per_pixel: f32,
-    points_per_scroll_line: f32,
     bg_color: Rgba,
     close_requested: bool,
     repaint_after: Option<Instant>,
-
-    full_output: egui::FullOutput,
 }
 
 impl<State, U> EguiWindow<State, U>
@@ -102,6 +113,7 @@ where
     fn new<B>(
         window: &mut baseview::Window<'_>,
         open_settings: OpenSettings,
+        #[cfg(feature = "wgpu")] wgpu_configuration: renderer::WgpuConfiguration,
         mut build: B,
         update: U,
         mut state: State,
@@ -110,7 +122,16 @@ where
         B: FnMut(&egui::Context, &mut Queue, &mut State),
         B: 'static + Send,
     {
-        let renderer = Renderer::new(window);
+        let renderer = Renderer::new(
+            window,
+            #[cfg(feature = "wgpu")]
+            wgpu_configuration.into(),
+        )
+        .unwrap_or_else(|err| {
+            // TODO: better error log and not panicking, but that's gonna require baseview changes
+            log::error!("oops! the gpu backend couldn't initialize! \n {err}");
+            panic!("gpu backend failed to initialize: \n {err}")
+        });
         let egui_ctx = egui::Context::default();
 
         // Assume scale for now until there is an event with a new one.
@@ -119,7 +140,6 @@ where
             WindowScalePolicy::SystemScaleFactor => 1.0,
         } as f32;
         let points_per_pixel = pixels_per_point.recip();
-        let points_per_scroll_line = 50.0; // Scroll speed decided by consensus: https://github.com/emilk/egui/issues/461
 
         let screen_rect = Rect::from_min_size(
             Pos2::new(0f32, 0f32),
@@ -146,13 +166,14 @@ where
         };
         let _ = egui_input.viewports.insert(viewport_id, viewport_info);
 
-        let physical_width = (open_settings.logical_width * pixels_per_point as f64).round() as u32;
-        let physical_height =
-            (open_settings.logical_height * pixels_per_point as f64).round() as u32;
+        let mut physical_size = PhySize {
+            width: (open_settings.logical_width * pixels_per_point as f64).round() as u32,
+            height: (open_settings.logical_height * pixels_per_point as f64).round() as u32,
+        };
 
         let mut bg_color = Rgba::BLACK;
         let mut close_requested = false;
-        let mut queue = Queue::new(&mut bg_color, &mut close_requested);
+        let mut queue = Queue::new(&mut bg_color, &mut close_requested, &mut physical_size);
         (build)(&egui_ctx, &mut queue, &mut state);
 
         let clipboard_ctx = match copypasta::ClipboardContext::new() {
@@ -180,17 +201,13 @@ where
 
             clipboard_ctx,
 
-            physical_width,
-            physical_height,
+            physical_size,
             pixels_per_point,
             points_per_pixel,
             scale_policy: open_settings.scale_policy,
-            points_per_scroll_line,
             bg_color,
             close_requested,
             repaint_after: Some(start_time),
-
-            full_output: FullOutput::default(),
         }
     }
 
@@ -205,7 +222,8 @@ where
     /// application and build the UI.
     pub fn open_parented<P, B>(
         parent: &P,
-        mut settings: WindowOpenOptions,
+        #[allow(unused_mut)] mut settings: WindowOpenOptions,
+        #[cfg(feature = "wgpu")] wgpu_configuration: renderer::WgpuConfiguration,
         state: State,
         build: B,
         update: U,
@@ -215,6 +233,7 @@ where
         B: FnMut(&egui::Context, &mut Queue, &mut State),
         B: 'static + Send,
     {
+        #[cfg(feature = "opengl")]
         if settings.gl_config.is_none() {
             settings.gl_config = Some(Default::default());
         }
@@ -225,7 +244,15 @@ where
             parent,
             settings,
             move |window: &mut baseview::Window<'_>| -> EguiWindow<State, U> {
-                EguiWindow::new(window, open_settings, build, update, state)
+                EguiWindow::new(
+                    window,
+                    open_settings,
+                    #[cfg(feature = "wgpu")]
+                    wgpu_configuration,
+                    build,
+                    update,
+                    state,
+                )
             },
         )
     }
@@ -238,11 +265,17 @@ where
     /// call `ctx.set_fonts()`. Optional.
     /// * `update` - Called before each frame. Here you should update the state of your
     /// application and build the UI.
-    pub fn open_blocking<B>(mut settings: WindowOpenOptions, state: State, build: B, update: U)
-    where
+    pub fn open_blocking<B>(
+        #[allow(unused_mut)] mut settings: WindowOpenOptions,
+        #[cfg(feature = "wgpu")] wgpu_configuration: renderer::WgpuConfiguration,
+        state: State,
+        build: B,
+        update: U,
+    ) where
         B: FnMut(&egui::Context, &mut Queue, &mut State),
         B: 'static + Send,
     {
+        #[cfg(feature = "opengl")]
         if settings.gl_config.is_none() {
             settings.gl_config = Some(Default::default());
         }
@@ -252,7 +285,15 @@ where
         Window::open_blocking(
             settings,
             move |window: &mut baseview::Window<'_>| -> EguiWindow<State, U> {
-                EguiWindow::new(window, open_settings, build, update, state)
+                EguiWindow::new(
+                    window,
+                    open_settings,
+                    #[cfg(feature = "wgpu")]
+                    wgpu_configuration,
+                    build,
+                    update,
+                    state,
+                )
             },
         )
     }
@@ -277,10 +318,19 @@ where
         };
 
         self.egui_input.time = Some(self.start_time.elapsed().as_secs_f64());
+        self.egui_input.screen_rect = Some(calculate_screen_rect(
+            self.physical_size,
+            self.points_per_pixel,
+        ));
+
         self.egui_ctx.begin_frame(self.egui_input.take());
 
         //let mut repaint_requested = false;
-        let mut queue = Queue::new(&mut self.bg_color, &mut self.close_requested);
+        let mut queue = Queue::new(
+            &mut self.bg_color,
+            &mut self.close_requested,
+            &mut self.physical_size,
+        );
 
         (self.user_update)(&self.egui_ctx, &mut queue, state);
 
@@ -290,9 +340,9 @@ where
 
         // Prevent data from being allocated every frame by storing this
         // in a member field.
-        self.full_output = self.egui_ctx.end_frame();
+        let mut full_output = self.egui_ctx.end_frame();
 
-        let Some(viewport_output) = self.full_output.viewport_output.get(&self.viewport_id) else {
+        let Some(viewport_output) = full_output.viewport_output.get(&self.viewport_id) else {
             // The main window was closed by egui.
             window.close();
             return;
@@ -320,14 +370,13 @@ where
 
         if do_repaint_now {
             self.renderer.render(
+                #[cfg(feature = "opengl")]
                 window,
                 self.bg_color,
-                self.physical_width,
-                self.physical_height,
+                self.physical_size,
                 self.pixels_per_point,
                 &mut self.egui_ctx,
-                &mut self.full_output.shapes,
-                &mut self.full_output.textures_delta,
+                &mut full_output,
             );
 
             self.repaint_after = None;
@@ -336,19 +385,24 @@ where
             self.repaint_after = Some(repaint_after);
         }
 
-        if !self.full_output.platform_output.copied_text.is_empty() {
+        if !full_output.platform_output.copied_text.is_empty() {
             if let Some(clipboard_ctx) = &mut self.clipboard_ctx {
                 if let Err(err) =
-                    clipboard_ctx.set_contents(self.full_output.platform_output.copied_text.clone())
+                    clipboard_ctx.set_contents(full_output.platform_output.copied_text.clone())
                 {
                     log::error!("Copy/Cut error: {}", err);
                 }
             }
-            self.full_output.platform_output.copied_text.clear();
+        }
+
+        if let Some(open_url) = &full_output.platform_output.open_url {
+            if let Err(err) = open::that_detached(&open_url.url) {
+                log::error!("Open error: {}", err);
+            }
         }
 
         let cursor_icon =
-            crate::translate::translate_cursor_icon(self.full_output.platform_output.cursor_icon);
+            crate::translate::translate_cursor_icon(full_output.platform_output.cursor_icon);
         if self.current_cursor_icon != cursor_icon {
             self.current_cursor_icon = cursor_icon;
 
@@ -411,33 +465,31 @@ where
                 } => {
                     self.update_modifiers(modifiers);
 
-                    let mut delta = match scroll_delta {
+                    #[allow(unused_mut)]
+                    let (unit, mut delta) = match scroll_delta {
                         baseview::ScrollDelta::Lines { x, y } => {
-                            egui::vec2(*x, *y) * self.points_per_scroll_line
+                            (egui::MouseWheelUnit::Line, egui::vec2(*x, *y))
                         }
-                        baseview::ScrollDelta::Pixels { x, y } => {
-                            egui::vec2(*x, *y) * self.points_per_pixel
-                        }
+
+                        baseview::ScrollDelta::Pixels { x, y } => (
+                            egui::MouseWheelUnit::Point,
+                            egui::vec2(*x, *y) * self.points_per_pixel,
+                        ),
                     };
+
                     if cfg!(target_os = "macos") {
                         // This is still buggy in winit despite
                         // https://github.com/rust-windowing/winit/issues/1695 being closed
+                        //
+                        // TODO: See if this is an issue in baseview as well.
                         delta.x *= -1.0;
                     }
 
-                    if self.egui_input.modifiers.ctrl || self.egui_input.modifiers.command {
-                        // Treat as zoom instead:
-                        let factor = (delta.y / 200.0).exp();
-                        self.egui_input.events.push(egui::Event::Zoom(factor));
-                    } else if self.egui_input.modifiers.shift {
-                        // Treat as horizontal scrolling.
-                        // Note: one Mac we already get horizontal scroll events when shift is down.
-                        self.egui_input
-                            .events
-                            .push(egui::Event::Scroll(egui::vec2(delta.x + delta.y, 0.0)));
-                    } else {
-                        self.egui_input.events.push(egui::Event::Scroll(delta));
-                    }
+                    self.egui_input.events.push(egui::Event::MouseWheel {
+                        unit,
+                        delta,
+                        modifiers: self.egui_input.modifiers,
+                    });
                 }
                 baseview::MouseEvent::CursorLeft => {
                     self.pointer_pos_in_points = None;
@@ -467,7 +519,7 @@ where
                             self.egui_input.modifiers.mac_cmd = pressed;
                             self.egui_input.modifiers.command = pressed;
                         }
-                        () // prevent `rustfmt` from breaking this
+                        // prevent `rustfmt` from breaking this
                     }
                     _ => (),
                 }
@@ -485,6 +537,8 @@ where
                 if pressed {
                     // VirtualKeyCode::Paste etc in winit are broken/untrustworthy,
                     // so we detect these things manually:
+                    //
+                    // TODO: See if this is an issue in baseview as well.
                     if is_cut_command(self.egui_input.modifiers, event.code) {
                         self.egui_input.events.push(egui::Event::Cut);
                     } else if is_copy_command(self.egui_input.modifiers, event.code) {
@@ -517,18 +571,10 @@ where
                     } as f32;
                     self.points_per_pixel = self.pixels_per_point.recip();
 
-                    self.physical_width = window_info.physical_size().width;
-                    self.physical_height = window_info.physical_size().height;
+                    self.physical_size = window_info.physical_size();
 
-                    let logical_size = (
-                        (self.physical_width as f32 * self.points_per_pixel),
-                        (self.physical_height as f32 * self.points_per_pixel),
-                    );
-
-                    let screen_rect = Rect::from_min_size(
-                        Pos2::new(0f32, 0f32),
-                        vec2(logical_size.0, logical_size.1),
-                    );
+                    let screen_rect =
+                        calculate_screen_rect(self.physical_size, self.points_per_pixel);
 
                     self.egui_input.screen_rect = Some(screen_rect);
 
@@ -537,7 +583,7 @@ where
                         .viewports
                         .get_mut(&self.viewport_id)
                         .unwrap();
-                    viewport_info.native_pixels_per_point = Some(self.pixels_per_point as f32);
+                    viewport_info.native_pixels_per_point = Some(self.pixels_per_point);
                     viewport_info.inner_rect = Some(screen_rect);
 
                     // Schedule to repaint on the next frame.
@@ -590,4 +636,13 @@ fn is_paste_command(modifiers: egui::Modifiers, keycode: keyboard_types::Code) -
         || (cfg!(target_os = "windows")
             && modifiers.shift
             && keycode == keyboard_types::Code::Insert)
+}
+
+/// Calculate screen rectangle in logical size.
+fn calculate_screen_rect(physical_size: PhySize, points_per_pixel: f32) -> Rect {
+    let logical_size = (
+        physical_size.width as f32 * points_per_pixel,
+        physical_size.height as f32 * points_per_pixel,
+    );
+    Rect::from_min_size(Pos2::new(0f32, 0f32), vec2(logical_size.0, logical_size.1))
 }
