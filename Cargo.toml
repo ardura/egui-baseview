@@ -24,9 +24,12 @@ wgpu = ["dep:egui-wgpu", "dep:raw-window-handle-06", "dep:pollster", "dep:wgpu"]
 rayon = ["egui/rayon"]
 
 [dependencies]
-egui = { version = "0.28", default-features = false, features = ["bytemuck"] }
-egui_glow = { version = "0.28", optional = true }
-egui-wgpu = { version = "0.28", optional = true }
+egui = { git = "https://github.com/ardura/egui.git", rev = "dda8922586a579fab5d98bf8908b9d998b26be4b", default-features = false, features = ["bytemuck"] }
+# egui = { version = "0.28", default-features = false, features = ["bytemuck"] }
+#egui_glow = { version = "0.28", optional = true }
+#egui-wgpu = { version = "0.28", optional = true }
+egui_glow = { git = "https://github.com/ardura/egui.git", rev = "dda8922586a579fab5d98bf8908b9d998b26be4b", optional = true }
+egui-wgpu = { git = "https://github.com/ardura/egui.git", rev = "dda8922586a579fab5d98bf8908b9d998b26be4b", optional = true }
 wgpu = { version = "0.20", optional = true }
 keyboard-types = { version = "0.6", default-features = false }
 baseview = { git = "https://github.com/RustAudio/baseview.git", rev = "45465c5f46abed6c6ce370fffde5edc8e4cd5aa3" }
