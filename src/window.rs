@@ -412,8 +412,8 @@ where
         }
 
         // This is the hack beepster and DRACONIUM on Rust Audio Discord helped me with to enable text output to nih-plug egui plugins
-        if !self.egui_ctx.end_frame().platform_output.events.is_empty() || 
-            self.egui_ctx.end_frame().platform_output.ime.is_some() {
+        if !full_output.platform_output.events.is_empty() || 
+            full_output.platform_output.ime.is_some() {
             #[cfg(target_os = "windows")]
             window.focus();
         }
